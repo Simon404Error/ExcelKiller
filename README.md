@@ -1,5 +1,7 @@
 # ExcelKiller Excel填补助手
 
+## 请使用 “管理员” 运行 exe
+
 > **此工具是本人为了帮哥们儿简化政府工作内容写的工具**
 > 
 > 如果各位觉得有什么修改的地方，可以Fork本仓库自己改改
@@ -62,5 +64,4 @@ python -m PyInstaller --noconfirm --onedir --windowed --name "ExcelKiller" ^
 |---|---|
 | `excel_tool.py` | 主程序（引擎 + 界面，单文件） |
 | `make_rule.py` | 生成示例规则 json |
-| `使用说明.txt` | 给使用者看的操作说明与常见问题 |
 | `smoke_test.py` 等 `test_*.py` | 开发期测试脚本（需自备样例表格，按脚本内路径调整） |
