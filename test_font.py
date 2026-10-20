@@ -1,0 +1,16 @@
+﻿import sys, os
+sys.path.insert(0, ".")
+import excel_tool as et
+app = et.App()
+app.update()
+print("初始:", app.var_font.get(), "| 按钮:", [w.cget("text") for w in app.winfo_children()[0].winfo_children() if hasattr(w, "cget")])
+app.var_font.set(14)
+app.update()
+app.after(300, app.quit)
+app.mainloop()
+print("改后（应已实时生效）:", app.var_font.get(), "| 行高:", et.ttk.Style(app).lookup("Treeview", "rowheight"))
+app.var_font.set(10)
+app.update()
+print("恢复:", app.var_font.get())
+app.destroy()
+print("测试通过")
