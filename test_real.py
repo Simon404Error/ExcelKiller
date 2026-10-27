@@ -5,8 +5,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from excel_tool import (SheetData, plan_fill, execute_fill, export_report, alias_group)
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-CUN = os.path.join(BASE, "表格示例", "曹门村", "曹门村10月份预警数据.xlsx")
-ZONG = os.path.join(BASE, "表格示例", "（3315条）10月份预警数据.xlsx")
+CUN = os.path.join(BASE, "表格示例", "旧的示例，暂时不用", "曹门村", "曹门村10月份预警数据.xlsx")
+ZONG = os.path.join(BASE, "表格示例", "旧的示例，暂时不用", "（3315条）10月份预警数据.xlsx")
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "测试输出")
 os.makedirs(OUT, exist_ok=True)
 

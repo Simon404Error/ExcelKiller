@@ -5,8 +5,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import excel_tool as et
 
 base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-ZONG = os.path.join(base, "表格示例", "（3315条）10月份预警数据.xlsx")
-CUN = os.path.join(base, "表格示例", "曹门村", "曹门村10月份预警数据.xlsx")
+ZONG = os.path.join(base, "表格示例", "旧的示例，暂时不用", "（3315条）10月份预警数据.xlsx")
+CUN = os.path.join(base, "表格示例", "旧的示例，暂时不用", "曹门村", "曹门村10月份预警数据.xlsx")
 
 et.enable_dpi_awareness()
 app = et.App()

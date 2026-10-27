@@ -28,7 +28,7 @@ import openpyxl
 from openpyxl.utils import get_column_letter
 from openpyxl.styles import Font, PatternFill, Alignment
 
-APP_TITLE = "Excel填补助手 for睿 v0.1.2"
+APP_TITLE = "Excel填补助手 for睿 v0.1.4"
 
 # ============================================================
 #                        一、通用清洗
@@ -184,9 +184,10 @@ class SheetData:
     """
 
     def __init__(self, path, sheet=None, header_row=None, header_rows=None, wb=None,
-                 visible_only=False):
+                 visible_only=False, trim_footer=True):
         self.path = os.path.abspath(path)
         self.visible_only = visible_only
+        self.trim_footer = trim_footer
         own = False
         if wb is None:
             wb = openpyxl.load_workbook(self.path, data_only=True)
@@ -200,7 +201,14 @@ class SheetData:
     def _load(self, wb, sheet, header_row, header_rows):
         self.sheet = sheet if sheet in wb.sheetnames else wb.sheetnames[0]
         ws = wb[self.sheet]
-        self.n_rows, self.n_cols = ws.max_row, ws.max_column
+        self.n_cols = ws.max_column
+        # 有些表整列/整行被“格式化”过，openpyxl 报的 max_row 会直接是 1048576，
+        # 逐格读取会像卡死一样。这里先用真实存在且非空的单元格定位数据的最后一行。
+        raw_max = ws.max_row
+        real_max = real_last_row(ws)
+        self.truncated = real_max < raw_max
+        self.n_rows = real_max
+        self.raw_max_row = raw_max
         # 筛选/隐藏行：openpyxl 依然能读到数据，这里统计出来供用户选择
         self.filter_ref = (ws.auto_filter.ref or "") if ws.auto_filter else ""
         self.hidden_rows = {r for r, dim in ws.row_dimensions.items() if dim.hidden}
@@ -215,11 +223,14 @@ class SheetData:
         self.header_row = header_row
         self.header_rows = span
 
-        # 合并单元格：让子单元格继承父单元格的值（用于 2 行表头）
+        # 合并单元格：让子单元格继承父单元格的值（只对表头区域需要，避免大合并区把内存吃爆）
         merged_fill = {}
+        hdr_end = header_row + span - 1
         for (r1, r2, c1, c2) in merged:
+            if r1 > hdr_end:
+                continue
             val = cell_text(ws.cell(row=r1, column=c1).value)
-            for r in range(r1, r2 + 1):
+            for r in range(r1, min(r2, hdr_end) + 1):
                 for c in range(c1, c2 + 1):
                     merged_fill[(r, c)] = val
 
@@ -245,8 +256,15 @@ class SheetData:
         self.first_data_row = header_row + span          # 1-based，数据首行
         hdr_norm = [norm_colname(h) for h in headers]
         rows = []
-        for r in range(self.first_data_row, ws.max_row + 1):
-            row = tuple(ws.cell(row=r, column=c).value for c in range(1, self.n_cols + 1))
+        if self.first_data_row > self.n_rows:
+            self.data_rows = []
+            self._excel_rows = []
+            return
+        # 用 iter_rows 一次性取（比逐个 ws.cell 快很多，超长表也不会卡）
+        raw_rows = ws.iter_rows(min_row=self.first_data_row, max_row=self.n_rows,
+                                min_col=1, max_col=self.n_cols, values_only=True)
+        for r, row in enumerate(raw_rows, start=self.first_data_row):
+            row = tuple(row) + (None,) * (self.n_cols - len(row))
             if all(cell_text(x) == "" for x in row):
                 continue
             # 有的表下面又贴了一份“带表头的表”：把这种重复表头行当数据会污染整表，跳过
@@ -266,8 +284,22 @@ class SheetData:
                 if self.visible_only:
                     continue          # 用户选择“只处理可见行”
             rows.append((r, row))
+        self.footer_trimmed = 0
+        if self.trim_footer:
+            while rows and _row_is_footer(rows[-1][1]):
+                rows.pop()
+                self.footer_trimmed += 1
         self.data_rows = [x[1] for x in rows]
         self._excel_rows = [x[0] for x in rows]
+        # 记录每行的行高，追加新行时可“照搬源表行高”
+        self.row_heights = {}
+        try:
+            for r in self._excel_rows:
+                dim = ws.row_dimensions.get(r)
+                if dim is not None and dim.height:
+                    self.row_heights[r] = dim.height
+        except Exception:
+            self.row_heights = {}
 
     @property
     def visible_count(self):
@@ -284,8 +316,9 @@ class SheetData:
         return [self.col_label(i) for i in range(len(self.headers))]
 
 
-def open_table(path, sheet, header_row=None, header_rows=None, wb=None, visible_only=False):
-    return SheetData(path, sheet, header_row, header_rows, wb, visible_only)
+def open_table(path, sheet, header_row=None, header_rows=None, wb=None, visible_only=False,
+               trim_footer=True):
+    return SheetData(path, sheet, header_row, header_rows, wb, visible_only, trim_footer)
 
 
 # ============================================================
@@ -482,8 +515,10 @@ def plan_append(sources, dst, mappings, auto_seq_col=None):
         "dup_dst": [], "dup_src": [], "conflicts": [], "errors": [],
         "_sheet": dst.sheet,
     }
-    for src in sources:
-        for row in src.data_rows:
+    heights = getattr(src, "row_heights", {}) or {}
+    src_rows = getattr(src, "_excel_rows", [])
+    for i_row, row in enumerate(src.data_rows):
+        if True:
             if all(cell_text(v) == "" for v in row):
                 continue
             vals = {}
@@ -495,7 +530,9 @@ def plan_append(sources, dst, mappings, auto_seq_col=None):
                 sv = row[si] if (si is not None and si < len(row)) else None
                 if cell_text(sv) != "":
                     vals[m["dst"]] = sv
-            plan["new_rows"].append({"src": src.label, "key": "追加", "values": vals})
+            h = heights.get(src_rows[i_row]) if i_row < len(src_rows) else None
+            plan["new_rows"].append({"src": src.label, "key": "追加",
+                                     "values": vals, "height": h})
     # 序号自动重排
     if auto_seq_col is not None:
         start = len(dst.data_rows) + 1
@@ -601,7 +638,12 @@ def plan_fill(sources, dst, key_pairs, mappings, mode, kopt,
                         if cell_text(sv) != "":
                             newrow[m["dst"]] = sv
                     nc = new_cands.setdefault(key_str, {"key": key_str, "opts": []})
-                    nc["opts"].append({"src": src.label, "values": newrow})
+                    try:
+                        h = (getattr(src, "row_heights", {}) or {}).get(
+                            src._excel_rows[hits[0]])
+                    except Exception:
+                        h = None
+                    nc["opts"].append({"src": src.label, "values": newrow, "height": h})
 
     # ---- 按单元格归并：唯一值直接写入，多值进入冲突清单 ----
     for (ri, col), c in cands.items():
@@ -630,14 +672,16 @@ def plan_fill(sources, dst, key_pairs, mappings, mode, kopt,
         opts = nc["opts"]
         if len(opts) == 1:
             plan["new_rows"].append({"src": opts[0]["src"], "key": key_str,
-                                     "values": opts[0]["values"]})
+                                     "values": opts[0]["values"],
+                                     "height": opts[0].get("height")})
             continue
         sig = set()
         for o in opts:
             sig.add(tuple(sorted((k, cell_text(v)) for k, v in o["values"].items())))
         if len(sig) == 1:
             plan["new_rows"].append({"src": opts[0]["src"], "key": key_str,
-                                     "values": opts[0]["values"]})
+                                     "values": opts[0]["values"],
+                                     "height": opts[0].get("height")})
         else:
             nc["type"] = "newrow"
             nc["options"] = opts
@@ -702,7 +746,7 @@ def resolve_conflicts(plan, choices):
             })
         else:
             plan["new_rows"].append({"src": o["src"], "key": c["key"],
-                                     "values": o["values"]})
+                                     "values": o["values"], "height": o.get("height")})
     plan["conflicts"] = []
     plan["stats"] = fill_stats(plan)
     return plan
@@ -743,9 +787,92 @@ def fallback_dirs():
     return out
 
 
+FOOTER_KW = ("意见", "说明", "签字", "盖章", "负责人", "填表", "审核",
+             "合计", "填报人", "备注：", "注：", "年　　月", "年月日")
+
+
+def _row_is_footer(row):
+    """判断一行是不是表尾的“意见/说明/签字”块（不该当数据导入）"""
+    cells = [cell_text(v) for v in row]
+    cells = [c for c in cells if c]
+    if not cells or len(cells) > 4:
+        return False
+    if any(len(c) > 30 for c in cells):
+        return True
+    return any(any(k in c for k in FOOTER_KW) for c in cells)
+
+
+def _has_value(v):
+    if v is None:
+        return False
+    if isinstance(v, str):
+        return v.strip() != ""
+    return True
+
+
+def real_last_row(ws, scan_limit=5000):
+    """返回真实数据的最后一行号。
+
+    有的表整列/整行被格式化过，openpyxl 的 max_row 会直接是 1048575；
+    逐格读到那里会像卡死。这里只看“真实存在且有值”的单元格，并丢掉离群的尾部单元格。
+    """
+    if ws.max_row <= scan_limit:
+        return ws.max_row
+    try:
+        if len(ws._cells) > 300000:      # 真·大表，别折腾，按原样读
+            return ws.max_row
+        rows = sorted({r for (r, _c), cell in ws._cells.items() if _has_value(cell.value)})
+        if not rows:
+            return min(ws.max_row, 1)
+        end = rows[0]
+        for r in rows[1:]:
+            if r - end > 100:            # 中间空了一百多行 → 后面的属于“离群单元格”
+                break
+            end = r
+        return min(end, ws.max_row)
+    except Exception:
+        return ws.max_row
+
+
+def insert_rows_keep_format(ws, at_row, amount):
+    """在 at_row 前插入若干行，并把下方合并单元格、行高一起下移
+
+    openpyxl 自带的 insert_rows 只挪数值不挪合并区/行高，这里补上，
+    这样“表尾的意见/盖章块”会整体下移，不会被新数据压坏。
+    """
+    if amount <= 0:
+        return
+    body_last = ws.max_row
+    heights = {}
+    for r in range(at_row, body_last + 1):
+        dim = ws.row_dimensions.get(r)
+        if dim is not None and dim.height:
+            heights[r] = dim.height
+    merges = [(m.min_row, m.max_row, m.min_col, m.max_col)
+              for m in ws.merged_cells.ranges if m.min_row >= at_row]
+    ws.insert_rows(at_row, amount)
+    for (r1, r2, c1, c2) in merges:
+        try:
+            ws.unmerge_cells(start_row=r1, start_column=c1, end_row=r2, end_column=c2)
+        except Exception:
+            pass
+        try:
+            ws.merge_cells(start_row=r1 + amount, start_column=c1,
+                           end_row=r2 + amount, end_column=c2)
+        except Exception:
+            pass
+    for r, h in heights.items():
+        try:
+            ws.row_dimensions[r + amount].height = h
+        except Exception:
+            pass
+
+
 def _last_data_row(ws, first_row, ncols):
     """从下往上找真正有数据的最后一行（跳过模板底部预格式化的空白行）"""
-    r = ws.max_row
+    r = real_last_row(ws)
+    if r < first_row:
+        r = first_row
     while r >= first_row:
         for c in range(1, ncols + 1):
             if cell_text(ws.cell(row=r, column=c).value) != "":
@@ -754,7 +881,7 @@ def _last_data_row(ws, first_row, ncols):
     return first_row - 1
 
 
-def execute_fill_multi(target_path, plans, out_path):
+def execute_fill_multi(target_path, plans, out_path, seq_renumber=False, copy_row_height=False):
     """把多个工作表的补全计划一次写入（复制目标文件后就地改单元格，保留格式/公式）
 
     plans: [(目标表 SheetData, 补全计划), ...]
@@ -787,9 +914,30 @@ def execute_fill_multi(target_path, plans, out_path):
         for ch in plan["changes"]:
             ws.cell(row=ch["excel_row"], column=ch["col"] + 1).value = ch["new"]
         if plan["new_rows"]:
-            # 从“最后一个有数据的行”下面开始写，避免写到模板底部 100 多行之外
-            last = _last_data_row(ws, dst.first_data_row, dst.n_cols)
-            r = max(last, dst.first_data_row - 1)
+            # 从“目标表最后一条真实数据”下面开始写（跳过底部预格式化空行与表尾意见块）
+            if dst.data_rows:
+                last = dst._excel_rows[-1]
+            else:
+                last = dst.first_data_row - 1
+            r = last
+            # 如果这段位置已经有内容（例如表尾的“意见/说明”），不覆盖，改为追加到其后
+            n_new = len(plan["new_rows"])
+            occupied = any(
+                cell_text(ws.cell(row=rr, column=cc).value) != ""
+                for rr in range(r + 1, r + 1 + n_new)
+                for cc in range(1, dst.n_cols + 1))
+            if occupied:
+                try:
+                    insert_rows_keep_format(ws, r + 1, n_new)
+                    plan.setdefault("notes", []).append(
+                        "「%s」下方有表尾内容（意见/说明等），已整体下移 %d 行腾出位置"
+                        % (dst.sheet, n_new))
+                except Exception as e:
+                    tail = real_last_row(ws)
+                    plan.setdefault("notes", []).append(
+                        "「%s」下方有表尾内容且下移失败（%s），新数据改为追加到其后（第 %d 行起）"
+                        % (dst.sheet, e, tail + 1))
+                    r = tail
             for nr in plan["new_rows"]:
                 r += 1
                 for c in range(1, dst.n_cols + 1):
@@ -800,6 +948,30 @@ def execute_fill_multi(target_path, plans, out_path):
                         _copy_row_style(ws, last, r, dst.n_cols)
                 except Exception:
                     pass
+                # 照搬源表行高（避免新行沿用模板里很高/很矮的行高）
+                if copy_row_height:
+                    h = nr.get("height")
+                    try:
+                        if h:
+                            ws.row_dimensions[r].height = float(h)
+                        else:
+                            ws.row_dimensions[r].height = None
+                    except Exception:
+                        pass
+            # 序号重排：把整列序号从 1 开始连续编（含原有行）
+            if seq_renumber:
+                seq_col = None
+                for i, hname in enumerate(dst.headers):
+                    if norm_colname(hname) in ("序号", "编号", "序"):
+                        seq_col = i
+                        break
+                if seq_col is not None:
+                    r2 = r
+                    for idx, rr in enumerate(range(dst.first_data_row, r2 + 1), start=1):
+                        try:
+                            ws.cell(row=rr, column=seq_col + 1).value = idx
+                        except Exception:
+                            pass
     wb.save(out_path)
     return out_path
 
@@ -1037,6 +1209,33 @@ def save_settings(d):
         pass
 
 
+def is_admin():
+    """当前是否以管理员身份运行（非 Windows 一律当作 True）"""
+    if sys.platform != "win32":
+        return True
+    try:
+        import ctypes
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return True
+
+
+def relaunch_as_admin(script_path=None, frozen=False):
+    """用“以管理员身份”重新拉起自己"""
+    try:
+        import ctypes
+        if frozen or getattr(sys, "frozen", False):
+            target = sys.executable
+            params = ""
+        else:
+            target = sys.executable
+            params = '"%s"' % (script_path or os.path.abspath(sys.argv[0]))
+        rc = ctypes.windll.shell32.ShellExecuteW(None, "runas", target, params, None, 1)
+        return rc > 32
+    except Exception:
+        return False
+
+
 def enable_dpi_awareness():
     """高分屏下让界面清晰（不做 DPI 感知会被系统拉伸导致发糊）"""
     if sys.platform != "win32":
@@ -1126,6 +1325,25 @@ class App(tk.Tk):
         self.build_fill()
         self.build_ledger()
         self.apply_font_size(self.var_font.get(), save=False)
+        self.after(500, self.check_admin)
+
+    # ---------- 管理员权限 ----------
+    def check_admin(self):
+        if is_admin():
+            return
+        if messagebox.askyesno(
+                "建议以管理员身份运行",
+                "当前不是以管理员身份运行。\n\n"
+                "建议以管理员身份运行本程序，否则在写入 C 盘、系统受保护目录，"
+                "或某些安全软件限制的文件夹时可能提示“无法写入 / 拒绝访问”。\n\n"
+                "是否现在以管理员身份重新启动？（会弹出系统 UAC 确认框）",
+                icon="warning"):
+            if relaunch_as_admin(frozen=getattr(sys, "frozen", False)):
+                self.destroy()
+            else:
+                messagebox.showwarning("未能提权",
+                                       "以管理员身份重启失败（可能你点了“否”）。\n"
+                                       "可以关掉本窗口，右键程序/批处理 → 以管理员身份运行。")
 
     # ---------- 字体大小（实时生效，无需“应用”按钮） ----------
     def _font_changed(self, *args):
@@ -1244,12 +1462,17 @@ class App(tk.Tk):
         self.var_led_suffix = tk.BooleanVar(value=True)
         self.var_led_seq = tk.BooleanVar(value=True)
         self.var_led_keep = tk.BooleanVar(value=True)
+        self.var_led_trim = tk.BooleanVar(value=True)
+        ttk.Checkbutton(f3, text="自动剔除表尾",
+                        variable=self.var_led_trim).pack(anchor="w")
         ttk.Checkbutton(f3, text="空白继承上一行（同户多人只填一次户主信息）",
                         variable=self.var_led_inherit).pack(anchor="w")
         ttk.Checkbutton(f3, text="自动统一镇/村名称（万和→万和镇、曹门→曹门村）",
                         variable=self.var_led_suffix).pack(anchor="w")
-        ttk.Checkbutton(f3, text="序号自动重排（按目标表现有行数续编）",
+        ttk.Checkbutton(f3, text="自动重排序号（从 1 开始连续编号）",
                         variable=self.var_led_seq).pack(anchor="w")
+        self.var_led_height = tk.BooleanVar(value=True)
+        ttk.Checkbutton(f3, text="照搬源表行宽高", variable=self.var_led_height).pack(anchor="w")
         ttk.Checkbutton(f3, text="保留原文件（另存为新文件）",
                         variable=self.var_led_keep).pack(anchor="w")
         self.var_led_out = tk.StringVar()
@@ -1360,7 +1583,7 @@ class App(tk.Tk):
     def led_get_dst(self, sheet):
         p = self.var_led_dst.get().strip()
         if sheet not in self.led_dst_cache:
-            self.led_dst_cache[sheet] = open_table(p, sheet)
+            self.led_dst_cache[sheet] = open_table(p, sheet, trim_footer=self.var_led_trim.get())
         return self.led_dst_cache[sheet]
 
     @staticmethod
@@ -1406,7 +1629,8 @@ class App(tk.Tk):
                     if wb is None or not self._sheet_match(sname, sheet):
                         continue
                     try:
-                        sd = SheetData(path, sname, wb=wb)
+                        sd = SheetData(path, sname, wb=wb,
+                                       trim_footer=self.var_led_trim.get())
                     except Exception as e:
                         warns.append("%s / %s 读取失败：%s" % (os.path.basename(path), sname, e))
                         continue
@@ -1515,7 +1739,9 @@ class App(tk.Tk):
             return
         self.var_led_out.set(out)
         try:
-            final = execute_fill_multi(src_path, plans, out)
+            final = execute_fill_multi(src_path, plans, out,
+                                       seq_renumber=self.var_led_seq.get(),
+                                       copy_row_height=self.var_led_height.get())
             rep = os.path.splitext(final)[0] + "_合并明细.xlsx"
             export_report_multi(plans, rep)
         except PermissionError as e:
@@ -1635,10 +1861,18 @@ class App(tk.Tk):
         r1b = ttk.Frame(f1)
         r1b.pack(fill="x", pady=(3, 0))
         self.var_visible = tk.BooleanVar(value=False)
+        self.var_trim_footer = tk.BooleanVar(value=True)
         ttk.Checkbutton(r1b, text="只处理可见行（表格被筛选时，忽略隐藏的行）",
                         variable=self.var_visible,
                         command=self.reload_sources).pack(side="left")
         ttk.Label(r1b, text="默认读取全部行（含被筛选隐藏的行）", style="Hint.TLabel").pack(side="left", padx=6)
+
+        r1c = ttk.Frame(f1)
+        r1c.pack(fill="x")
+        ttk.Checkbutton(r1c, text="自动剔除表尾",
+                        variable=self.var_trim_footer,
+                        command=self.reload_sources).pack(side="left")
+        ttk.Label(r1c, text="默认选中", style="Hint.TLabel").pack(side="left", padx=6)
 
         # --- 2 目标表 ---
         f2 = ttk.LabelFrame(left, text=" 2. 目标表（要被补全的表，工作表可多选） ", padding=6)
@@ -1788,6 +2022,14 @@ class App(tk.Tk):
         ttk.Button(r5c, text="删除冲突记忆", width=12,
                    command=self.clear_conflict_memory).pack(side="right")
 
+        self.var_seq_renumber = tk.BooleanVar(value=True)
+        self.var_copy_height = tk.BooleanVar(value=True)
+        rn = ttk.Frame(f5)
+        rn.pack(fill="x")
+        ttk.Checkbutton(rn, text="自动重排序号（从 1 开始连续编号）",
+                        variable=self.var_seq_renumber).pack(side="left")
+        ttk.Checkbutton(rn, text="照搬源表行宽高", variable=self.var_copy_height).pack(side="left", padx=10)
+
         self.var_name_skip = tk.BooleanVar(value=True)
         ttk.Checkbutton(f5, text="身份/键相同但姓名对不上时不写入（防源表错行）",
                         variable=self.var_name_skip).pack(anchor="w")
@@ -1868,7 +2110,8 @@ class App(tk.Tk):
                 continue
             try:
                 sd = open_table(p, info["sheet"], info["row"], info["span"],
-                                visible_only=self.var_visible.get())
+                                visible_only=self.var_visible.get(),
+                                trim_footer=self.var_trim_footer.get())
             except Exception as e:
                 messagebox.showerror("读取失败", "%s：%s" % (os.path.basename(p), e))
                 continue
@@ -1896,7 +2139,8 @@ class App(tk.Tk):
             try:
                 for name in wb.sheetnames:
                     try:
-                        sd = SheetData(p, name, wb=wb, visible_only=self.var_visible.get())
+                        sd = SheetData(p, name, wb=wb, visible_only=self.var_visible.get(),
+                                   trim_footer=self.var_trim_footer.get())
                     except Exception as e:
                         self.log(self.txt_fill, "跳过 %s / %s：%s" % (os.path.basename(p), name, e))
                         continue
@@ -1908,6 +2152,19 @@ class App(tk.Tk):
                 wb.close()
             self.log(self.txt_fill, "已导入 %s（%d 个工作表有数据）" % (os.path.basename(p), 1))
         self.log(self.txt_fill, "批量导入完成：文件 %d 个，工作表 %d 个" % (len(paths), total))
+        foot = [x for x in self.sources if getattr(x, "footer_trimmed", 0)]
+        if foot:
+            self.log(self.txt_fill,
+                     "ℹ 已剔除 %d 个工作表的表尾“意见/说明”行（共 %d 行），例如：%s（%d 行）"
+                     "；不想剔除就取消勾选“自动剔除表尾…”，会按新设置重新读取"
+                     % (len(foot), sum(x.footer_trimmed for x in foot),
+                        foot[0].label, foot[0].footer_trimmed))
+        trunc = [x for x in self.sources if getattr(x, "truncated", False)]
+        if trunc:
+            self.log(self.txt_fill,
+                     "ℹ 有 %d 个工作表被“整表格式化”过（Excel 报表尺寸到 104 万行），已按真实数据读取，"
+                     "例如：%s（原报 104 万行，实际 %d 行）"
+                     % (len(trunc), trunc[0].label, len(trunc[0].data_rows)))
         hidden = sum(s.hidden_in_data for s in self.sources)
         if hidden:
             self.log(self.txt_fill,
@@ -1968,7 +2225,8 @@ class App(tk.Tk):
         for sd in old:
             try:
                 nd = open_table(sd.path, sd.sheet, sd.header_row, sd.header_rows,
-                                visible_only=self.var_visible.get())
+                                visible_only=self.var_visible.get(),
+                                trim_footer=self.var_trim_footer.get())
             except Exception as e:
                 self.log(self.txt_fill, "重新读取失败 %s：%s" % (sd.label, e))
                 continue
@@ -2041,7 +2299,8 @@ class App(tk.Tk):
             old = self.sources[i]
             try:
                 self.sources[i] = open_table(old.path, info["sheet"], info["row"], info["span"],
-                                             visible_only=self.var_visible.get())
+                                             visible_only=self.var_visible.get(),
+                                             trim_footer=self.var_trim_footer.get())
             except Exception as e:
                 messagebox.showerror("读取失败", "%s：%s" % (old.sheet, e))
                 return
@@ -2243,6 +2502,10 @@ class App(tk.Tk):
                 if lab.endswith("｜" + g):
                     self.cb_keydst.set(lab)
                     break
+        if getattr(self.dst, "truncated", False):
+            self.log(self.txt_fill,
+                     "ℹ 目标工作表「%s」同样被整表格式化（报 104 万行），已按真实 %d 行读取"
+                     % (self.dst.sheet, len(self.dst.data_rows)))
         n_pair = len(self.pairs)
         n_ok = sum(1 for x in self.pairs if x["target"])
         self.lb_dst_info.configure(
@@ -3056,7 +3319,9 @@ class App(tk.Tk):
             return
         self.var_out.set(out)
         try:
-            final = execute_fill_multi(src_path, plans, out)
+            final = execute_fill_multi(src_path, plans, out,
+                                       seq_renumber=self.var_seq_renumber.get(),
+                                       copy_row_height=self.var_copy_height.get())
         except PermissionError as e:
             messagebox.showerror("写入失败（文件被占用）",
                                  "%s\n\n请关掉 Excel 中已打开的该文件，或换一个输出文件名后重试。" % e)

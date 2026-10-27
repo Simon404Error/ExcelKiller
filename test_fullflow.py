@@ -2,7 +2,7 @@
 sys.path.insert(0, ".")
 import excel_tool as et
 
-D = r"D:\Deepseek-Harness\work\101915_5527\表格示例"
+D = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "表格示例", "旧的示例，暂时不用")
 TARGET = os.path.join(D, "（3315条）10月份预警数据.xlsx")
 # 只取各村的“预警数据”文件（不含动态调整表）
 files = []

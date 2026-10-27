@@ -3,8 +3,8 @@ sys.path.insert(0, ".")
 from excel_tool import list_sheets, SheetData, alias_group
 
 BASE = os.path.dirname(os.getcwd())
-CUN = os.path.join(BASE, "表格示例", "曹门村", "曹门村10月份预警数据.xlsx")
-ZONG = os.path.join(BASE, "表格示例", "（3315条）10月份预警数据.xlsx")
+CUN = os.path.join(BASE, "表格示例", "旧的示例，暂时不用", "曹门村", "曹门村10月份预警数据.xlsx")
+ZONG = os.path.join(BASE, "表格示例", "旧的示例，暂时不用", "（3315条）10月份预警数据.xlsx")
 sheets = list_sheets(ZONG)
 
 rule = {

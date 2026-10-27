@@ -2,7 +2,7 @@
 sys.path.insert(0, ".")
 import openpyxl
 
-D = r"D:\Deepseek-Harness\work\101915_5527\表格示例"
+D = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "表格示例", "旧的示例，暂时不用")
 files = []
 for root, dirs, fs in os.walk(D):
     for f in fs:
